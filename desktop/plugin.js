@@ -2,27 +2,287 @@
  * workflow-cron — desktop half.
  * Folder: ~/.hermes/plugins/workflow-cron/desktop/plugin.js
  * Backend: ~/.hermes/plugins/workflow-cron/dashboard/plugin_api.py (mounted at
- * /api/plugins/workflow-cron/*, reached here only via ctx.rest — namespaced,
- * traversal-safe by construction).
+ * /api/plugins/workflow-cron/*, reached here only via ctx.rest).
  *
- * A full-page workflow canvas (n8n-style: an ordered list of typed step
- * "cards" you wire top-to-bottom — no free-form drag/drop wiring in v1, just
- * reorder + add/remove) plus a sidebar nav entry and a run-history view.
- * Cron jobs across every profile are aggregated by GET /cron/jobs (the
- * backend calls hermes_cli's own dashboard-cron listing in-process) so
- * "cron_step" nodes can be picked from a real cross-profile list.
+ * Two tabs on one page:
+ *  - "Crons" (default, primary): every cron job across every served profile
+ *    in one list — status, schedule, next actions (pause/resume/fire now/
+ *    delete) and recent runs. This is the central visual management the
+ *    Cron sidebar panel doesn't give you (that one is scoped to one profile
+ *    at a time).
+ *  - "Workflows" (secondary): an ordered list of typed step cards (cron_step,
+ *    http_request, condition, delay, notify) sequenced top-to-bottom into a
+ *    cross-profile pipeline, backed by the plugin's own SQLite engine.
  */
 
 import {
   Badge, Button, cn, EmptyState, host, Input, ROUTES_AREA, ScrollArea, Select,
   SelectContent, SelectItem, SelectTrigger, SelectValue, SIDEBAR_NAV_AREA,
-  StatusDot, Textarea, useQuery, useMutation, useQueryClient, usePluginI18n
+  StatusDot, Textarea, useQuery, useQueryClient, usePluginI18n
 } from '@hermes/plugin-sdk'
 import { jsx, jsxs, Fragment } from 'react/jsx-runtime'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 
 const ID = 'workflow-cron'
 const PATH = '/workflow-cron'
+
+let _restFn = null
+const rest = (path, opts) => _restFn(path, opts)
+
+// =====================================================================
+// Shared bits
+// =====================================================================
+
+const STATUS_COLOR = {
+  running: 'info',
+  completed: 'success',
+  failed: 'error',
+  skipped_branch: 'warning',
+  cancelled: 'neutral',
+  pending: 'neutral'
+}
+
+function StepBadge({ status }) {
+  return jsx(Badge, { variant: STATUS_COLOR[status] || 'neutral', children: status })
+}
+
+function PageTabs({ tab, onChange }) {
+  const tabs = [
+    { id: 'crons', label: 'Crons' },
+    { id: 'workflows', label: 'Workflows' }
+  ]
+  return jsx('div', {
+    className: 'flex items-center gap-1 border-b border-(--ui-stroke-secondary) px-3 pt-2',
+    children: tabs.map(t => jsx('button', {
+      type: 'button',
+      onClick: () => onChange(t.id),
+      className: cn(
+        'rounded-t-md border border-b-0 px-3 py-1.5 text-xs font-medium transition-colors',
+        tab === t.id
+          ? 'border-(--ui-stroke-secondary) bg-(--ui-bg-primary) text-(--ui-text-primary)'
+          : 'border-transparent text-(--ui-text-tertiary) hover:text-(--ui-text-secondary)'
+      ),
+      children: t.label
+    }, t.id))
+  })
+}
+
+// =====================================================================
+// CRONS tab — primary cross-profile management surface.
+// =====================================================================
+
+function relTime(iso) {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return String(iso)
+  const diffMs = d.getTime() - Date.now()
+  const abs = Math.abs(diffMs)
+  const mins = Math.round(abs / 60000)
+  const label =
+    mins < 1 ? 'now' :
+    mins < 60 ? `${mins}m` :
+    mins < 1440 ? `${Math.round(mins / 60)}h` :
+    `${Math.round(mins / 1440)}d`
+  return diffMs >= 0 ? `in ${label}` : `${label} ago`
+}
+
+const PROFILE_COLORS = ['#818cf8', '#34d399', '#fbbf24', '#f472b6', '#38bdf8', '#a78bfa', '#fb923c']
+function profileColor(name) {
+  let h = 0
+  for (let i = 0; i < (name || '').length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0
+  return PROFILE_COLORS[h % PROFILE_COLORS.length]
+}
+
+function ProfileChip({ name }) {
+  const color = profileColor(name)
+  return jsx('span', {
+    className: 'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[0.6875rem] font-medium',
+    style: { backgroundColor: `${color}22`, color },
+    children: name || 'unknown'
+  })
+}
+
+function CronRuns({ job }) {
+  const { data, isLoading } = useQuery({
+    queryKey: [ID, 'cron-runs', job.id, job.profile],
+    queryFn: () => rest(`/cron/jobs/${job.id}/runs?profile=${encodeURIComponent(job.profile)}&limit=5`)
+  })
+  const runs = data?.runs || []
+  if (isLoading) return jsx('div', { className: 'p-2 text-[0.6875rem] text-(--ui-text-tertiary)', children: 'loading runs…' })
+  if (!runs.length) return jsx('div', { className: 'p-2 text-[0.6875rem] text-(--ui-text-tertiary)', children: 'No runs yet.' })
+  return jsx('div', {
+    className: 'flex flex-col gap-1 border-t border-(--ui-stroke-secondary) p-2',
+    children: runs.map(r => jsxs('div', {
+      className: 'flex items-center justify-between gap-2 text-[0.6875rem]',
+      children: [
+        jsx('span', { className: 'text-(--ui-text-tertiary)', children: new Date(r.started_at || r.created_at).toLocaleString() }),
+        jsx(StepBadge, { status: r.status || 'completed' })
+      ]
+    }, r.id || r.started_at))
+  })
+}
+
+function CronCard({ job, onChanged }) {
+  const [expanded, setExpanded] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const paused = job.enabled === false || job.status === 'paused'
+
+  async function act(action) {
+    setBusy(true)
+    try {
+      if (action === 'delete' && !window.confirm(`Delete cron "${job.name}"? This cannot be undone.`)) {
+        setBusy(false)
+        return
+      }
+      const method = action === 'delete' ? 'DELETE' : 'POST'
+      const path = action === 'delete'
+        ? `/cron/jobs/${job.id}?profile=${encodeURIComponent(job.profile)}`
+        : `/cron/jobs/${job.id}/${action}?profile=${encodeURIComponent(job.profile)}`
+      await rest(path, { method })
+      host.notify({ kind: 'success', message: `Cron "${job.name}" — ${action} ok.` })
+      onChanged()
+    } catch (e) {
+      host.notify({ kind: 'error', message: `Failed to ${action}: ${e?.message || e}` })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return jsxs('div', {
+    className: 'flex flex-col rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-primary) shadow-sm',
+    children: [
+      jsxs('div', {
+        className: 'flex items-center gap-3 p-3',
+        children: [
+          jsx(StatusDot, { status: paused ? 'neutral' : 'success' }),
+          jsxs('div', {
+            className: 'flex min-w-0 flex-1 flex-col gap-1',
+            children: [
+              jsxs('div', {
+                className: 'flex items-center gap-2',
+                children: [
+                  jsx('span', { className: 'truncate text-sm font-medium', children: job.name || job.id }),
+                  jsx(ProfileChip, { name: job.profile })
+                ]
+              }),
+              jsxs('div', {
+                className: 'flex flex-wrap items-center gap-x-3 gap-y-1 text-[0.6875rem] text-(--ui-text-tertiary)',
+                children: [
+                  jsx('span', { className: 'font-mono', children: job.schedule || job.cron_expr || '—' }),
+                  job.next_run_at && jsx('span', { children: `next: ${relTime(job.next_run_at)}` }),
+                  job.last_run_at && jsx('span', { children: `last: ${relTime(job.last_run_at)}` }),
+                  paused && jsx(Badge, { variant: 'neutral', children: 'paused' })
+                ]
+              })
+            ]
+          }),
+          jsxs('div', {
+            className: 'flex items-center gap-1',
+            children: [
+              jsx(Button, {
+                size: 'xs', variant: 'outline', disabled: busy,
+                onClick: () => act('trigger'),
+                children: '▶ Fire now'
+              }),
+              jsx(Button, {
+                size: 'xs', variant: 'outline', disabled: busy,
+                onClick: () => act(paused ? 'resume' : 'pause'),
+                children: paused ? 'Resume' : 'Pause'
+              }),
+              jsx(Button, {
+                size: 'xs', variant: 'ghost', disabled: busy,
+                onClick: () => act('delete'),
+                children: '✕'
+              }),
+              jsx(Button, {
+                size: 'icon-sm', variant: 'ghost',
+                onClick: () => setExpanded(v => !v),
+                children: expanded ? '▲' : '▼'
+              })
+            ]
+          })
+        ]
+      }),
+      expanded && jsx(CronRuns, { job })
+    ]
+  })
+}
+
+function CronsPage() {
+  const [filterProfile, setFilterProfile] = useState('all')
+  const [search, setSearch] = useState('')
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
+    queryKey: [ID, 'cron-jobs'],
+    queryFn: () => rest('/cron/jobs'),
+    refetchInterval: 30000
+  })
+  const jobs = data?.jobs || []
+
+  const profiles = useMemo(() => {
+    const set = new Set(jobs.map(j => j.profile).filter(Boolean))
+    return Array.from(set).sort()
+  }, [jobs])
+
+  const filtered = jobs.filter(j => {
+    if (filterProfile !== 'all' && j.profile !== filterProfile) return false
+    if (search && !`${j.name} ${j.profile}`.toLowerCase().includes(search.toLowerCase())) return false
+    return true
+  })
+
+  return jsxs('div', {
+    className: 'flex h-full flex-col',
+    children: [
+      jsxs('div', {
+        className: 'flex flex-wrap items-center gap-2 border-b border-(--ui-stroke-secondary) p-3',
+        children: [
+          jsxs('div', { className: 'text-sm font-medium', children: [
+            'All cron jobs',
+            jsx('span', { className: 'ml-2 text-(--ui-text-tertiary)', children: `(${jobs.length} across ${profiles.length} profile${profiles.length === 1 ? '' : 's'})` })
+          ] }),
+          jsx('div', { className: 'flex-1' }),
+          jsx(Input, {
+            placeholder: 'Search name or profile…', className: 'h-7 w-48',
+            value: search, onChange: e => setSearch(e.target.value)
+          }),
+          jsx(Select, {
+            value: filterProfile,
+            onValueChange: setFilterProfile,
+            children: jsxs(Fragment, {
+              children: [
+                jsx(SelectTrigger, { className: 'h-7 w-36', children: jsx(SelectValue, {}) }),
+                jsx(SelectContent, {
+                  children: [
+                    jsx(SelectItem, { value: 'all', children: 'All profiles' }, 'all'),
+                    ...profiles.map(p => jsx(SelectItem, { value: p, children: p }, p))
+                  ]
+                })
+              ]
+            })
+          }),
+          jsx(Button, { size: 'xs', variant: 'outline', disabled: isFetching, onClick: () => refetch(), children: isFetching ? '…' : '↻ Refresh' })
+        ]
+      }),
+      jsx(ScrollArea, {
+        className: 'flex-1',
+        children: jsx('div', {
+          className: 'flex flex-col gap-2 p-3',
+          children: isLoading
+            ? jsx('div', { className: 'p-4 text-xs text-(--ui-text-tertiary)', children: 'Loading cron jobs from every profile…' })
+            : isError
+              ? jsx('div', { className: 'p-4 text-xs text-(--ui-danger)', children: `Failed to load: ${error?.message || error}` })
+              : !filtered.length
+                ? jsx(EmptyState, { title: 'No cron jobs found', description: jobs.length ? 'No job matches this filter.' : 'No cron jobs exist in any served profile yet — create one from a chat with /cron.' })
+                : filtered.map(j => jsx(CronCard, { key: j.id, job: j, onChanged: refetch }))
+        })
+      })
+    ]
+  })
+}
+
+// =====================================================================
+// WORKFLOWS tab — secondary: sequence cron_step / http_request / condition /
+// delay / notify nodes into a cross-profile pipeline.
+// =====================================================================
 
 const NODE_TYPES = [
   { value: 'cron_step', label: 'Cron step (fire + wait)' },
@@ -42,30 +302,10 @@ function newNode(type) {
   return { id, type }
 }
 
-const STATUS_COLOR = {
-  running: 'info',
-  completed: 'success',
-  failed: 'error',
-  skipped_branch: 'warning',
-  cancelled: 'neutral',
-  pending: 'neutral'
-}
-
-function StepBadge({ status }) {
-  return jsx(Badge, { variant: STATUS_COLOR[status] || 'neutral', children: status })
-}
-
-// ---------------------------------------------------------------------
-// Cron job picker — feeds cron_step.profile / job_id from the real
-// cross-profile aggregation, so users never hand-type a job id.
-// ctx.rest is only available inside register(); components reach it through
-// a small closure captured at registration time (see CronJobsField below).
-let _restFn = null
-
 function CronJobsField({ node, onChange }) {
   const { data, isLoading } = useQuery({
     queryKey: [ID, 'cron-jobs'],
-    queryFn: () => _restFn('/cron/jobs'),
+    queryFn: () => rest('/cron/jobs'),
     staleTime: 15000
   })
   const jobs = data?.jobs || []
@@ -94,9 +334,6 @@ function CronJobsField({ node, onChange }) {
   })
 }
 
-// ---------------------------------------------------------------------
-// One step card: type-specific fields + reorder/remove controls.
-// ---------------------------------------------------------------------
 function StepCard({ node, index, total, onChange, onRemove, onMove }) {
   const set = (patch) => onChange({ ...node, ...patch })
 
@@ -223,13 +460,10 @@ function StepCard({ node, index, total, onChange, onRemove, onMove }) {
   })
 }
 
-// ---------------------------------------------------------------------
-// Run history + live status for the selected workflow.
-// ---------------------------------------------------------------------
 function RunsPanel({ workflowId }) {
   const { data, refetch } = useQuery({
     queryKey: [ID, 'runs', workflowId],
-    queryFn: () => _restFn(`/workflows/${workflowId}/runs`),
+    queryFn: () => rest(`/workflows/${workflowId}/runs`),
     enabled: !!workflowId,
     refetchInterval: 4000
   })
@@ -253,7 +487,7 @@ function RunsPanel({ workflowId }) {
         }),
         r.status === 'running' && jsx(Button, {
           size: 'xs', variant: 'ghost',
-          onClick: async () => { await _restFn(`/runs/${r.id}/cancel`, { method: 'POST' }); refetch() },
+          onClick: async () => { await rest(`/runs/${r.id}/cancel`, { method: 'POST' }); refetch() },
           children: 'cancel'
         })
       ]
@@ -261,11 +495,7 @@ function RunsPanel({ workflowId }) {
   })
 }
 
-// ---------------------------------------------------------------------
-// Main page: workflow list (left) + editor/runs (right).
-// ---------------------------------------------------------------------
-function WorkflowPage() {
-  const t = usePluginI18n(ID)
+function WorkflowsPage() {
   const qc = useQueryClient()
   const [selectedId, setSelectedId] = useState(null)
   const [draftName, setDraftName] = useState('')
@@ -274,10 +504,9 @@ function WorkflowPage() {
 
   const { data: wfData, isLoading } = useQuery({
     queryKey: [ID, 'workflows'],
-    queryFn: () => _restFn('/workflows')
+    queryFn: () => rest('/workflows')
   })
   const workflows = wfData?.workflows || []
-  const selected = workflows.find(w => w.id === selectedId)
 
   function loadWorkflow(wf) {
     setSelectedId(wf.id)
@@ -295,10 +524,10 @@ function WorkflowPage() {
 
   async function save() {
     if (selectedId === '__new__') {
-      const created = await _restFn('/workflows', { method: 'POST', body: { name: draftName, steps: draftSteps } })
+      const created = await rest('/workflows', { method: 'POST', body: { name: draftName, steps: draftSteps } })
       setSelectedId(created.id)
     } else {
-      await _restFn(`/workflows/${selectedId}`, { method: 'PUT', body: { name: draftName, steps: draftSteps } })
+      await rest(`/workflows/${selectedId}`, { method: 'PUT', body: { name: draftName, steps: draftSteps } })
     }
     setDirty(false)
     qc.invalidateQueries({ queryKey: [ID, 'workflows'] })
@@ -307,30 +536,22 @@ function WorkflowPage() {
 
   async function run() {
     if (!selectedId || selectedId === '__new__') return
-    await _restFn(`/workflows/${selectedId}/run`, { method: 'POST' })
+    await rest(`/workflows/${selectedId}/run`, { method: 'POST' })
     qc.invalidateQueries({ queryKey: [ID, 'runs', selectedId] })
     host.notify({ kind: 'info', message: 'Workflow started.' })
   }
 
   async function del() {
     if (!selectedId || selectedId === '__new__') return
-    await _restFn(`/workflows/${selectedId}`, { method: 'DELETE' })
+    if (!window.confirm('Delete this workflow?')) return
+    await rest(`/workflows/${selectedId}`, { method: 'DELETE' })
     setSelectedId(null)
     qc.invalidateQueries({ queryKey: [ID, 'workflows'] })
   }
 
-  function addNode(type) {
-    setDraftSteps(s => [...s, newNode(type)])
-    setDirty(true)
-  }
-  function updateNode(i, node) {
-    setDraftSteps(s => s.map((n, idx) => idx === i ? node : n))
-    setDirty(true)
-  }
-  function removeNode(i) {
-    setDraftSteps(s => s.filter((_, idx) => idx !== i))
-    setDirty(true)
-  }
+  function addNode(type) { setDraftSteps(s => [...s, newNode(type)]); setDirty(true) }
+  function updateNode(i, node) { setDraftSteps(s => s.map((n, idx) => idx === i ? node : n)); setDirty(true) }
+  function removeNode(i) { setDraftSteps(s => s.filter((_, idx) => idx !== i)); setDirty(true) }
   function moveNode(i, dir) {
     setDraftSteps(s => {
       const arr = [...s]
@@ -345,7 +566,6 @@ function WorkflowPage() {
   return jsxs('div', {
     className: 'flex h-full',
     children: [
-      // Left: workflow list
       jsxs('div', {
         className: 'flex w-64 shrink-0 flex-col border-r border-(--ui-stroke-secondary)',
         children: [
@@ -361,7 +581,7 @@ function WorkflowPage() {
             children: isLoading
               ? jsx('div', { className: 'p-3 text-[0.6875rem] text-(--ui-text-tertiary)', children: 'Loading…' })
               : !workflows.length
-                ? jsx(EmptyState, { title: 'No workflows yet', description: 'Create one to sequence cron jobs across profiles.' })
+                ? jsx(EmptyState, { title: 'No workflows yet', description: 'Sequence cron jobs across profiles.' })
                 : jsx('div', {
                     className: 'flex flex-col',
                     children: workflows.map(w => jsxs('button', {
@@ -381,7 +601,6 @@ function WorkflowPage() {
           })
         ]
       }),
-      // Right: editor + runs
       jsx('div', {
         className: 'flex-1 overflow-hidden',
         children: !selectedId
@@ -437,25 +656,43 @@ function WorkflowPage() {
   })
 }
 
+// =====================================================================
+// Root page: tab switcher, Crons default.
+// =====================================================================
+
+function RootPage() {
+  usePluginI18n(ID)
+  const [tab, setTab] = useState('crons')
+  return jsxs('div', {
+    className: 'flex h-full flex-col',
+    children: [
+      jsx(PageTabs, { tab, onChange: setTab }),
+      jsx('div', {
+        className: 'flex-1 overflow-hidden',
+        children: tab === 'crons' ? jsx(CronsPage, {}) : jsx(WorkflowsPage, {})
+      })
+    ]
+  })
+}
+
 export default {
   id: ID,
-  name: 'Workflow Cron',
+  name: 'Crons & Workflows',
   register(ctx) {
     _restFn = (path, opts) => ctx.rest(path, opts)
 
     ctx.i18n.register({
-      en: { navLabel: 'Workflows' }
+      en: { navLabel: 'Crons' }
     })
 
     ctx.registerMany([
-      { id: 'page', area: ROUTES_AREA, data: { path: PATH }, render: () => jsx(WorkflowPage, {}) },
-      { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: PATH, label: 'Workflows', codicon: 'combine' } }
+      { id: 'page', area: ROUTES_AREA, data: { path: PATH }, render: () => jsx(RootPage, {}) },
+      { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: PATH, label: 'Crons', codicon: 'clock' } }
     ])
 
     ctx.socket('/events', () => {
       // Backend has no push events yet (v1 relies on refetchInterval); this
-      // is a no-op subscription so a future SSE/WS stream on the Python side
-      // "just works" without another desktop change.
+      // is a no-op subscription so a future SSE/WS stream "just works".
     })
   }
 }

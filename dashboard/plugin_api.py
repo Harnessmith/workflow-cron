@@ -541,12 +541,47 @@ async def health():
 
 @router.get("/cron/jobs")
 async def list_all_cron_jobs():
-    """Aggregate cron jobs across every served profile — feeds the desktop
-    canvas's node picker (drag a cron job in as a `cron_step`)."""
+    """Aggregate cron jobs across every served profile — feeds both the
+    primary Crons dashboard and the workflow canvas's node picker."""
     from hermes_cli.web_routers.cron import _list_cron_jobs_sync
 
     jobs = _list_cron_jobs_sync("all")
     return {"jobs": jobs}
+
+
+@router.post("/cron/jobs/{job_id}/pause")
+async def pause_cron_job(job_id: str, profile: Optional[str] = None):
+    from hermes_cli.web_routers.cron import _pause_cron_job_sync
+
+    return _pause_cron_job_sync(job_id, profile)
+
+
+@router.post("/cron/jobs/{job_id}/resume")
+async def resume_cron_job(job_id: str, profile: Optional[str] = None):
+    from hermes_cli.web_routers.cron import _resume_cron_job_sync
+
+    return _resume_cron_job_sync(job_id, profile)
+
+
+@router.post("/cron/jobs/{job_id}/trigger")
+async def trigger_cron_job(job_id: str, profile: Optional[str] = None):
+    from hermes_cli.web_routers.cron import _trigger_cron_job_sync
+
+    return _trigger_cron_job_sync(job_id, profile)
+
+
+@router.delete("/cron/jobs/{job_id}")
+async def delete_cron_job(job_id: str, profile: Optional[str] = None):
+    from hermes_cli.web_routers.cron import _delete_cron_job_sync
+
+    return _delete_cron_job_sync(job_id, profile)
+
+
+@router.get("/cron/jobs/{job_id}/runs")
+async def list_cron_job_runs(job_id: str, profile: Optional[str] = None, limit: int = 20):
+    from hermes_cli.web_routers.cron import _list_cron_job_runs_sync
+
+    return _list_cron_job_runs_sync(job_id, profile, limit)
 
 
 @router.get("/workflows")

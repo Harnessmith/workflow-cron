@@ -102,6 +102,12 @@ function ProfileChip({ name }) {
   })
 }
 
+function runStatus(r) {
+  if (r.is_active) return 'running'
+  if (r.error) return 'failed'
+  return 'completed'
+}
+
 function CronRuns({ job }) {
   const { data, isLoading } = useQuery({
     queryKey: [ID, 'cron-runs', job.id, job.profile],
@@ -112,13 +118,19 @@ function CronRuns({ job }) {
   if (!runs.length) return jsx('div', { className: 'p-2 text-[0.6875rem] text-(--ui-text-tertiary)', children: 'No runs yet.' })
   return jsx('div', {
     className: 'flex flex-col gap-1 border-t border-(--ui-stroke-secondary) p-2',
-    children: runs.map(r => jsxs('div', {
-      className: 'flex items-center justify-between gap-2 text-[0.6875rem]',
+    children: runs.map(r => jsxs('button', {
+      type: 'button',
+      onClick: () => host.openSession(r.id, { profile: job.profile }),
+      className: 'flex items-center justify-between gap-2 rounded px-1 py-0.5 text-left text-[0.6875rem] hover:bg-(--ui-bg-hover)',
+      title: 'Open this run in chat',
       children: [
-        jsx('span', { className: 'text-(--ui-text-tertiary)', children: new Date(r.started_at || r.created_at).toLocaleString() }),
-        jsx(StepBadge, { status: r.status || 'completed' })
+        jsxs('span', { className: 'flex min-w-0 flex-col', children: [
+          jsx('span', { className: 'text-(--ui-text-tertiary)', children: new Date((r.started_at || 0) * 1000).toLocaleString() }),
+          r.preview && jsx('span', { className: 'truncate text-(--ui-text-quaternary)', children: r.preview })
+        ] }),
+        jsx(StepBadge, { status: runStatus(r) })
       ]
-    }, r.id || r.started_at))
+    }, r.id))
   })
 }
 
@@ -126,6 +138,13 @@ function CronCard({ job, onChanged }) {
   const [expanded, setExpanded] = useState(false)
   const [busy, setBusy] = useState(false)
   const paused = job.enabled === false || job.state === 'paused'
+
+  const { data: runsData } = useQuery({
+    queryKey: [ID, 'cron-runs', job.id, job.profile],
+    queryFn: () => rest(`/cron/jobs/${job.id}/runs?profile=${encodeURIComponent(job.profile)}&limit=1`),
+    staleTime: 20000
+  })
+  const lastRun = runsData?.runs?.[0] || null
 
   async function act(action) {
     setBusy(true)
@@ -179,6 +198,12 @@ function CronCard({ job, onChanged }) {
           jsxs('div', {
             className: 'flex items-center gap-1',
             children: [
+              lastRun && jsx(Button, {
+                size: 'xs', variant: 'ghost', disabled: busy,
+                onClick: () => host.openSession(lastRun.id, { profile: job.profile }),
+                title: 'Open the most recent run in chat',
+                children: '💬 Last result'
+              }),
               jsx(Button, {
                 size: 'xs', variant: 'outline', disabled: busy,
                 onClick: () => act('trigger'),
@@ -208,9 +233,99 @@ function CronCard({ job, onChanged }) {
   })
 }
 
+function NewCronForm({ onCreated, onCancel }) {
+  const [profile, setProfile] = useState('')
+  const [name, setName] = useState('')
+  const [schedule, setSchedule] = useState('0 9 * * *')
+  const [prompt, setPrompt] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const { data } = useQuery({
+    queryKey: [ID, 'profiles'],
+    queryFn: () => rest('/profiles')
+  })
+  const profiles = data?.profiles || []
+
+  async function submit() {
+    if (!profile || !schedule || !prompt) {
+      host.notify({ kind: 'error', message: 'Profile, schedule and prompt are required.' })
+      return
+    }
+    setSaving(true)
+    try {
+      await rest('/cron/jobs', {
+        method: 'POST',
+        body: { profile, name, schedule, prompt, deliver: 'local' }
+      })
+      host.notify({ kind: 'success', message: `Cron "${name || prompt.slice(0, 30)}" created.` })
+      onCreated()
+    } catch (e) {
+      host.notify({ kind: 'error', message: `Failed to create cron: ${e?.message || e}` })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return jsxs('div', {
+    className: 'flex flex-col gap-2 border-b border-(--ui-stroke-secondary) bg-(--ui-bg-primary) p-3',
+    children: [
+      jsxs('div', {
+        className: 'grid grid-cols-2 gap-2',
+        children: [
+          jsxs('div', {
+            className: 'flex flex-col gap-1',
+            children: [
+              jsx('label', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: 'Profile' }),
+              jsx(Select, {
+                value: profile,
+                onValueChange: setProfile,
+                children: jsxs(Fragment, {
+                  children: [
+                    jsx(SelectTrigger, { className: 'h-7', children: jsx(SelectValue, { placeholder: 'pick profile…' }) }),
+                    jsx(SelectContent, { children: profiles.map(p => jsx(SelectItem, { value: p, children: p }, p)) })
+                  ]
+                })
+              })
+            ]
+          }),
+          jsxs('div', {
+            className: 'flex flex-col gap-1',
+            children: [
+              jsx('label', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: 'Name (optional)' }),
+              jsx(Input, { className: 'h-7', value: name, onChange: e => setName(e.target.value), placeholder: 'Radar de Notícias' })
+            ]
+          }),
+          jsxs('div', {
+            className: 'flex flex-col gap-1',
+            children: [
+              jsx('label', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: 'Schedule (cron expr)' }),
+              jsx(Input, { className: 'h-7 font-mono', value: schedule, onChange: e => setSchedule(e.target.value), placeholder: '0 9 * * *' })
+            ]
+          })
+        ]
+      }),
+      jsxs('div', {
+        className: 'flex flex-col gap-1',
+        children: [
+          jsx('label', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: 'Prompt' }),
+          jsx(Textarea, { rows: 3, value: prompt, onChange: e => setPrompt(e.target.value), placeholder: 'What should this cron ask the agent to do?' })
+        ]
+      }),
+      jsxs('div', {
+        className: 'flex justify-end gap-2',
+        children: [
+          jsx(Button, { size: 'xs', variant: 'ghost', onClick: onCancel, disabled: saving, children: 'Cancel' }),
+          jsx(Button, { size: 'xs', variant: 'default', onClick: submit, disabled: saving, children: saving ? 'Creating…' : 'Create cron job' })
+        ]
+      })
+    ]
+  })
+}
+
 function CronsPage() {
   const [filterProfile, setFilterProfile] = useState('all')
   const [search, setSearch] = useState('')
+  const [creating, setCreating] = useState(false)
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: [ID, 'cron-jobs'],
     queryFn: () => rest('/cron/jobs'),
@@ -259,8 +374,13 @@ function CronsPage() {
               ]
             })
           }),
-          jsx(Button, { size: 'xs', variant: 'outline', disabled: isFetching, onClick: () => refetch(), children: isFetching ? '…' : '↻ Refresh' })
+          jsx(Button, { size: 'xs', variant: 'outline', disabled: isFetching, onClick: () => refetch(), children: isFetching ? '…' : '↻ Refresh' }),
+          jsx(Button, { size: 'xs', variant: 'default', onClick: () => setCreating(v => !v), children: creating ? 'Cancel' : '+ New cron' })
         ]
+      }),
+      creating && jsx(NewCronForm, {
+        onCancel: () => setCreating(false),
+        onCreated: () => { setCreating(false); refetch() }
       }),
       jsx(ScrollArea, {
         className: 'flex-1',

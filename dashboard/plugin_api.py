@@ -584,6 +584,32 @@ async def list_cron_job_runs(job_id: str, profile: Optional[str] = None, limit: 
     return _list_cron_job_runs_sync(job_id, profile, limit)
 
 
+@router.get("/profiles")
+async def list_profiles():
+    """Names of every served profile, for the create-cron-job form's profile picker."""
+    from hermes_cli.web_server_cron import _cron_profile_dicts
+
+    names = sorted({str(item.get("name") or "") for item in _cron_profile_dicts()} - {""})
+    return {"profiles": names}
+
+
+class CronJobCreateProxy(BaseModel):
+    profile: str
+    name: str = ""
+    prompt: str = ""
+    schedule: str
+    deliver: str = "local"
+
+
+@router.post("/cron/jobs")
+async def create_cron_job(body: CronJobCreateProxy):
+    from hermes_cli.web_models import CronJobCreate
+    from hermes_cli.web_server_cron import _create_cron_job_sync
+
+    inner = CronJobCreate(prompt=body.prompt, schedule=body.schedule, name=body.name, deliver=body.deliver)
+    return _create_cron_job_sync(inner, body.profile)
+
+
 @router.get("/workflows")
 async def list_workflows():
     _ensure_schema()

@@ -1,0 +1,4 @@
+{
+  "name": "workflow-cron",
+  "api": "plugin_api.py"
+}

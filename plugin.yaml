@@ -1,0 +1,5 @@
+name: workflow-cron
+version: 0.1.0
+description: "Workflow engine over cron jobs across every profile: sequence cron_step/http_request/condition/delay/notify nodes, cross-profile, n8n-style, with a desktop canvas UI."
+author: forge
+kind: standalone

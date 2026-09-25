@@ -18,7 +18,7 @@
 import {
   Badge, Button, cn, EmptyState, host, Input, ROUTES_AREA, ScrollArea, Select,
   SelectContent, SelectItem, SelectTrigger, SelectValue, SIDEBAR_NAV_AREA,
-  StatusDot, Textarea, useQuery, useQueryClient, usePluginI18n
+  StatusDot, Textarea, useQuery, useQueryClient
 } from '@hermes/plugin-sdk'
 import { jsx, jsxs, Fragment } from 'react/jsx-runtime'
 import { useMemo, useState } from 'react'
@@ -34,16 +34,16 @@ const rest = (path, opts) => _restFn(path, opts)
 // =====================================================================
 
 const STATUS_COLOR = {
-  running: 'info',
+  running: 'default',
   completed: 'success',
-  failed: 'error',
-  skipped_branch: 'warning',
-  cancelled: 'neutral',
-  pending: 'neutral'
+  failed: 'destructive',
+  skipped_branch: 'warn',
+  cancelled: 'muted',
+  pending: 'muted'
 }
 
 function StepBadge({ status }) {
-  return jsx(Badge, { variant: STATUS_COLOR[status] || 'neutral', children: status })
+  return jsx(Badge, { variant: STATUS_COLOR[status] || 'muted', children: status })
 }
 
 function PageTabs({ tab, onChange }) {
@@ -154,7 +154,7 @@ function CronCard({ job, onChanged }) {
       jsxs('div', {
         className: 'flex items-center gap-3 p-3',
         children: [
-          jsx(StatusDot, { status: paused ? 'neutral' : 'success' }),
+          jsx(StatusDot, { tone: paused ? 'muted' : 'good' }),
           jsxs('div', {
             className: 'flex min-w-0 flex-1 flex-col gap-1',
             children: [
@@ -171,7 +171,7 @@ function CronCard({ job, onChanged }) {
                   jsx('span', { className: 'font-mono', children: job.schedule || job.cron_expr || '—' }),
                   job.next_run_at && jsx('span', { children: `next: ${relTime(job.next_run_at)}` }),
                   job.last_run_at && jsx('span', { children: `last: ${relTime(job.last_run_at)}` }),
-                  paused && jsx(Badge, { variant: 'neutral', children: 'paused' })
+                  paused && jsx(Badge, { variant: 'muted', children: 'paused' })
                 ]
               })
             ]
@@ -442,7 +442,7 @@ function StepCard({ node, index, total, onChange, onRemove, onMove }) {
             className: 'flex items-center gap-2',
             children: [
               jsx('span', { className: 'font-mono text-[0.6875rem] text-(--ui-text-tertiary)', children: `#${index + 1}` }),
-              jsx(Badge, { variant: 'neutral', children: node.type })
+              jsx(Badge, { variant: 'muted', children: node.type })
             ]
           }),
           jsxs('div', {
@@ -594,7 +594,7 @@ function WorkflowsPage() {
                       onClick: () => loadWorkflow(w),
                       children: [
                         jsx('span', { className: 'truncate', children: w.name }),
-                        jsx(StatusDot, { status: w.enabled ? 'success' : 'neutral' })
+                        jsx(StatusDot, { tone: w.enabled ? 'good' : 'muted' })
                       ]
                     }, w.id))
                   })
@@ -661,7 +661,6 @@ function WorkflowsPage() {
 // =====================================================================
 
 function RootPage() {
-  usePluginI18n(ID)
   const [tab, setTab] = useState('crons')
   return jsxs('div', {
     className: 'flex h-full flex-col',
@@ -680,10 +679,6 @@ export default {
   name: 'Crons & Workflows',
   register(ctx) {
     _restFn = (path, opts) => ctx.rest(path, opts)
-
-    ctx.i18n.register({
-      en: { navLabel: 'Crons' }
-    })
 
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: PATH }, render: () => jsx(RootPage, {}) },

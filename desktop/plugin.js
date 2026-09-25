@@ -125,7 +125,7 @@ function CronRuns({ job }) {
 function CronCard({ job, onChanged }) {
   const [expanded, setExpanded] = useState(false)
   const [busy, setBusy] = useState(false)
-  const paused = job.enabled === false || job.status === 'paused'
+  const paused = job.enabled === false || job.state === 'paused'
 
   async function act(action) {
     setBusy(true)
@@ -168,7 +168,7 @@ function CronCard({ job, onChanged }) {
               jsxs('div', {
                 className: 'flex flex-wrap items-center gap-x-3 gap-y-1 text-[0.6875rem] text-(--ui-text-tertiary)',
                 children: [
-                  jsx('span', { className: 'font-mono', children: job.schedule || job.cron_expr || '—' }),
+                  jsx('span', { className: 'font-mono', children: job.schedule_display || job.schedule?.display || job.cron_expr || '—' }),
                   job.next_run_at && jsx('span', { children: `next: ${relTime(job.next_run_at)}` }),
                   job.last_run_at && jsx('span', { children: `last: ${relTime(job.last_run_at)}` }),
                   paused && jsx(Badge, { variant: 'muted', children: 'paused' })
